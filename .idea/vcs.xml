@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-cygwin/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/allegro-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/enet-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/function2-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/function2-src/test/googletest" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug-mingw/_deps/spdlog-src" vcs="Git" />
+  </component>
+</project>
