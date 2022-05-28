@@ -2,8 +2,10 @@
 
 #include <enet/enet.h>
 #include <function2/function2.hpp>
+#include <span>
 #include <type_traits>
 
+#include "assert.hpp"
 #include "common.hpp"
 #include "proto.hpp"
 
@@ -51,8 +53,28 @@ public:
         ENetPacketFlag flag,
         const Packet<t>& packet)
     {
+        static_assert(
+            !requires { typename Packet<t>::Continuation; },
+            "Missing continuation argument in send!");
         enet_peer_send(
             peer, channel, enet_packet_create(&packet, sizeof(packet), flag));
+    }
+
+    template<PacketType t>
+    requires requires { typename Packet<t>::Continuation; }
+    void send(
+        ENetPeer* peer,
+        enet_uint8 channel,
+        ENetPacketFlag flag,
+        const Packet<t>& packet,
+        std::span<typename Packet<t>::Continuation> cont)
+    {
+        using Cont = typename Packet<t>::Continuation;
+        size_t contSizeBytes = sizeof(Cont) * cont.size();
+        auto enetpacket =
+            enet_packet_create(&packet, sizeof(packet) + contSizeBytes, flag);
+        std::memcpy(enetpacket->data + sizeof(packet), cont.data(), contSizeBytes);
+        enet_peer_send(peer, channel, enetpacket);
     }
 
     template<PacketType t>
@@ -112,6 +134,7 @@ public:
 
                     auto type =
                         *reinterpret_cast<PacketType*>(event.packet->data);
+
                     NG_VERIFY(
                         static_cast<int>(type) <
                         static_cast<int>(PacketType::COUNT));
@@ -119,18 +142,41 @@ public:
                     auto procPacketType = [type,
                                            peer,
                                            data,
+                                           size = event.packet->dataLength,
                                            this]<PacketType t>() {
                         if (type == t) {
                             const Packet<t>& packet =
                                 *reinterpret_cast<const Packet<t>*>(data);
-                            // I hoped that it would find the default handlePacket on it's own,
-                            // but two-phase lookup is hard :(
+
                             if constexpr (requires {
-                                              self().handlePacket(peer, packet);
+                                              typename Packet<t>::Continuation;
                                           }) {
-                                self().handlePacket(peer, packet);
+                                using PacketCont =
+                                    typename Packet<t>::Continuation;
+                                std::span<PacketCont> cont{
+                                    reinterpret_cast<PacketCont*>(
+                                        data + sizeof(Packet<t>)),
+                                    (size - sizeof(Packet<t>)) /
+                                        sizeof(PacketCont)};
+                                if constexpr (requires {
+                                                  self().handlePacket(
+                                                      peer, packet, cont);
+                                              }) {
+                                    self().handlePacket(peer, packet, cont);
+                                } else {
+                                    handlePacket(peer, packet);
+                                }
                             } else {
-                                handlePacket(peer, packet);
+                                // I hoped that it would find the default handlePacket on it's own,
+                                // but two-phase lookup is hard :(
+                                if constexpr (requires {
+                                                  self().handlePacket(
+                                                      peer, packet);
+                                              }) {
+                                    self().handlePacket(peer, packet);
+                                } else {
+                                    handlePacket(peer, packet);
+                                }
                             }
                         }
                     };

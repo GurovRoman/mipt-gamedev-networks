@@ -290,6 +290,63 @@ public:
         }
     }
 
+    void applySnapshots(Clock::time_point now, float delta)
+    {
+        constexpr auto forcedLagMs = 250ms;
+        auto time = now - forcedLagMs;
+
+        for (auto& entity: entities_) {
+            if (!snapshotHistories_.contains(entity.id))
+                continue;
+            auto& snapshots = snapshotHistories_.at(entity.id);
+            if (entity.id != playerEntityId_) {
+                interpolate(entity, snapshots, time);
+            } else {
+                playerVelHistory_.emplace_back(PlayerInputSnapshot{
+                    .vel = playerDesiredSpeed_,
+                    .time = now,
+                });
+                entity.vel = playerDesiredSpeed_;
+                entity.simulate(delta);
+
+                if (playerServerPredicted.has_value()) {
+                    playerServerPredicted->vel = playerDesiredSpeed_;
+                    playerServerPredicted->simulate(delta);
+
+                    glm::vec2 compensation =
+                        (playerServerPredicted->pos - entity.pos) * delta;
+                    if (glm::length(compensation) > entity.size / 100.f) {
+                        entity.pos += compensation;
+                        playerServerPredicted->pos -= compensation;
+                    }
+                }
+
+                if (snapshots.empty())
+                    continue;
+
+                auto snapshot = snapshots.back();
+                // std::chrono is f'n awesome
+                snapshot.time -= server_peer_->roundTripTime / 2 * 1ms;
+                snapshots.clear();
+                while (!playerVelHistory_.empty() &&
+                       playerVelHistory_.front().time < snapshot.time) {
+                    playerVelHistory_.pop_front();
+                }
+
+                Entity predicted = entity;
+                predicted.pos = snapshot.pos;
+                Clock::time_point last = snapshot.time;
+                for (auto& [vel, time]: playerVelHistory_) {
+                    predicted.vel = vel;
+                    predicted.simulate(durationToSecs(time - last));
+                    last = time;
+                }
+
+                playerServerPredicted = predicted;
+            }
+        }
+    }
+
     void run()
     {
         constexpr auto kSendRate = 60ms;
@@ -307,61 +364,7 @@ public:
             Service::poll();
 
             if (server_peer_ != nullptr) {
-                constexpr auto forcedLagMs = 250ms;
-                auto time = Clock::now() - forcedLagMs;
-
-                for (auto& entity: entities_) {
-                    if (!snapshotHistories_.contains(entity.id))
-                        continue;
-                    auto& snapshots = snapshotHistories_.at(entity.id);
-                    if (entity.id != playerEntityId_) {
-                        interpolate(entity, snapshots, time);
-                    } else {
-                        playerVelHistory_.emplace_back(PlayerInputSnapshot{
-                            .vel = playerDesiredSpeed_,
-                            .time = now,
-                        });
-                        entity.vel = playerDesiredSpeed_;
-                        entity.simulate(delta);
-
-                        if (playerServerPredicted.has_value()) {
-                            playerServerPredicted->vel = playerDesiredSpeed_;
-                            playerServerPredicted->simulate(delta);
-
-                            glm::vec2 compensation =
-                                (playerServerPredicted->pos - entity.pos) *
-                                delta;
-                            if (glm::length(compensation) >
-                                entity.size / 100.f) {
-                                entity.pos += compensation;
-                                playerServerPredicted->pos -= compensation;
-                            }
-                        }
-
-                        if (snapshots.empty())
-                            continue;
-
-                        auto snapshot = snapshots.back();
-                        // std::chrono is f'n awesome
-                        snapshot.time -= server_peer_->roundTripTime / 2 * 1ms;
-                        snapshots.clear();
-                        while (!playerVelHistory_.empty() &&
-                               playerVelHistory_.front().time < snapshot.time) {
-                            playerVelHistory_.pop_front();
-                        }
-
-                        Entity predicted = entity;
-                        predicted.pos = snapshot.pos;
-                        Clock::time_point last = snapshot.time;
-                        for (auto& [vel, time]: playerVelHistory_) {
-                            predicted.vel = vel;
-                            predicted.simulate(durationToSecs(time - last));
-                            last = time;
-                        }
-
-                        playerServerPredicted = predicted;
-                    }
-                }
+                applySnapshots(now, delta);
             }
 
             if (server_peer_ != nullptr && playerEntityId_ != kInvalidId &&
