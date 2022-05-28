@@ -12,7 +12,7 @@ target_link_libraries("${target_name}_game" PUBLIC spdlog glm::glm)
 
 add_executable("${target_name}_client" client.cpp)
 target_link_libraries("${target_name}_client"
-    "${target_name}_common" "${target_name}_game" allegro allegro_font allegro_primitives)
+        "${target_name}_common" "${target_name}_game" allegro allegro_font allegro_primitives)
 
 copy_allegro_dlls("${target_name}_client")
 

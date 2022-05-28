@@ -1,28 +1,33 @@
 #pragma once
 
-#include "Entity.hpp"
 #include "../common/proto.hpp"
-
+#include "Entity.hpp"
 
 PROTO_IMPL_PACKET(EntitySnapshot)
 {
-  uint32_t id;
-  glm::vec2 pos;
+    uint32_t id;
+    glm::vec2 pos;
 };
 
 PROTO_IMPL_PACKET(PlayerInput)
 {
-  glm::vec2 desiredSpeed;
+    glm::vec2 desiredSpeed;
 };
 
 PROTO_IMPL_PACKET(SpawnEntity)
 {
-  Entity entity;
+    Entity entity;
 };
 
-PROTO_IMPL_PACKET(DestroyEntity) { uint32_t id; };
+PROTO_IMPL_PACKET(DestroyEntity)
+{
+    uint32_t id;
+};
 
-PROTO_IMPL_PACKET(PossesEntity) { uint32_t id; };
+PROTO_IMPL_PACKET(PossesEntity)
+{
+    uint32_t id;
+};
 
 PROTO_IMPL_PACKET(EntityPropsChanged)
 {
