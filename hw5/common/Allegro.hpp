@@ -5,6 +5,7 @@
 #include <allegro5/allegro_primitives.h>
 
 #include "assert.hpp"
+#include "common.hpp"
 
 template<class Derived>
 class Allegro {
