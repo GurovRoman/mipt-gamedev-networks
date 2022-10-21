@@ -29,4 +29,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 include(thirdparty.cmake)
 
 add_subdirectory(hw1)
+add_subdirectory(hw2)
 add_subdirectory(hw5)
