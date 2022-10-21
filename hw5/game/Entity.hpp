@@ -15,6 +15,7 @@ struct Entity {
     float size = 0.1f;
     uint32_t color = 0xffffffff;
     id_t id = kInvalidId;
+    uint8_t teleport_count = 0;
 
     void simulate(float dt);
 

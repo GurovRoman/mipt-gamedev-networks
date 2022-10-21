@@ -3,41 +3,19 @@
 #include "../common/proto.hpp"
 #include "Entity.hpp"
 
-PROTO_IMPL_PACKET(EntitySnapshot)
-{
-    uint32_t id;
-    glm::vec2 pos;
-};
-
-PROTO_IMPL_PACKET(PlayerInput)
-{
-    glm::vec2 desiredSpeed;
-};
-
-PROTO_IMPL_PACKET(SpawnEntity)
-{
-    Entity entity;
-};
-
-PROTO_IMPL_PACKET(DestroyEntity)
+PROTO_IMPL_PACKET(PossessEntity)
 {
     uint32_t id;
 };
 
-PROTO_IMPL_PACKET(PossesEntity)
+PROTO_IMPL_PACKET(StateDelta)
 {
-    uint32_t id;
+    uint64_t epoch;
+    uint64_t total_bytes;
+    using Continuation = uint8_t;
 };
 
-PROTO_IMPL_PACKET(EntityPropsChanged)
+PROTO_IMPL_PACKET(StateDeltaConfirmation)
 {
-    uint32_t id;
-    float size;
-    uint32_t color;
-};
-
-PROTO_IMPL_PACKET(EntityTeleport)
-{
-    uint32_t id;
-    glm::vec2 pos;
+    uint64_t epoch;
 };

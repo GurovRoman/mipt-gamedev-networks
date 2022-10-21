@@ -13,13 +13,11 @@ enum class PacketType : uint8_t {
     PlayerJoined,
     PlayerLeft,
     Chat,
-    EntitySnapshot,
-    SpawnEntity,
-    DestroyEntity,
-    PossesEntity,
+    SetKey,
+    StateDelta,
+    StateDeltaConfirmation,
+    PossessEntity,
     PlayerInput,
-    EntityPropsChanged,
-    EntityTeleport,
     COUNT,
 };
 
@@ -60,4 +58,9 @@ PROTO_IMPL_PACKET(Chat)
 {
     uint32_t player;
     std::array<char, 1000> message;
+};
+
+PROTO_IMPL_PACKET(SetKey)
+{
+    std::array<uint8_t, 16> key;
 };

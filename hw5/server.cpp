@@ -1,10 +1,12 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <iostream>
+#include <random>
 #include <unordered_map>
 
 #include "common/Service.hpp"
 #include "common/assert.hpp"
+#include "common/delta.hpp"
 #include "common/proto.hpp"
 
 #include "game/Entity.hpp"
@@ -64,6 +66,29 @@ public:
     {
         spdlog::info("{}:{} joined", peer->address.host, peer->address.port);
 
+        static auto genKey = []() {
+            using value_type = int;
+            static std::default_random_engine generator;
+            static std::uniform_int_distribution<value_type> distribution;
+
+            std::array<uint8_t, 16> key;
+            std::generate(key.begin(), key.end(), []() { return distribution(generator); });
+
+            return key;
+        };
+
+        auto key = genKey();
+
+        send(
+            peer,
+            0,
+            ENET_PACKET_FLAG_RELIABLE,
+            PSetKey{
+                .key = key,
+            });
+
+        setKeyForPeer(peer, {key.begin(), key.end()});
+
         auto id = idCounter_++;
 
         auto& created = entities_.emplace_back(Entity::create());
@@ -79,7 +104,7 @@ public:
             peer,
             0,
             ENET_PACKET_FLAG_RELIABLE,
-            PPossesEntity{
+            PPossessEntity{
                 .id = created.id,
             });
 
@@ -89,18 +114,10 @@ public:
 
             send(client, 0, ENET_PACKET_FLAG_RELIABLE, PPlayerJoined{.id = id});
 
-            send(
-                client,
-                0,
-                ENET_PACKET_FLAG_RELIABLE,
-                PSpawnEntity{.entity = created});
-
             send(peer, 0, ENET_PACKET_FLAG_RELIABLE, PPlayerJoined{.id = data.id});
         }
 
-        for (auto& entity: entities_) {
-            send(peer, 0, ENET_PACKET_FLAG_RELIABLE, PSpawnEntity{.entity = entity});
-        }
+        send_deltas();
     }
 
     Entity* entityById(id_t id)
@@ -115,7 +132,9 @@ public:
         return &*it;
     }
 
-    void handlePacket(ENetPeer* peer, const PPlayerInput& packet)
+    // input delta-compression
+    void handlePacket(
+        ENetPeer* peer, const PStateDelta& packet, std::span<std::uint8_t> cont)
     {
         auto it = clients_.find(peer);
         if (it == clients_.end())
@@ -126,14 +145,22 @@ public:
         if (entity == nullptr)
             return;
 
-        float len = glm::length(packet.desiredSpeed);
+        std::cout << "Applying delta of size " << cont.size() << " at epoch "
+                  << packet.epoch << std::endl;
+        NG_ASSERT(sizeof(entity->vel) == packet.total_bytes);
+        delta_apply(
+            {reinterpret_cast<uint8_t*>(&entity->vel), sizeof(entity->vel)},
+            cont);
+        send(peer, 1, {}, PStateDeltaConfirmation{.epoch = packet.epoch});
+
+        float len = glm::length(entity->vel);
 
         if (len < 1e-3) {
             entity->vel = {0, 0};
             return;
         }
 
-        entity->vel = packet.desiredSpeed / len * std::clamp(len, 0.f, 1.f);
+        entity->vel = entity->vel / len * std::clamp(len, 0.f, 1.f);
     }
 
     void disconnected(ENetPeer* peer)
@@ -163,31 +190,6 @@ public:
         }
     }
 
-    void broadcastEntityChange(const Entity& entity, bool teleport)
-    {
-        for (auto& [client, _]: clients_) {
-            send(
-                client,
-                0,
-                ENET_PACKET_FLAG_RELIABLE,
-                PEntityPropsChanged{
-                    .id = entity.id,
-                    .size = entity.size,
-                    .color = entity.color,
-                });
-            if (teleport) {
-                send(
-                    client,
-                    0,
-                    ENET_PACKET_FLAG_RELIABLE,
-                    PEntityTeleport{
-                        .id = entity.id,
-                        .pos = entity.pos,
-                    });
-            }
-        }
-    }
-
     void updateLogic(float delta)
     {
         for (auto& entity: entities_) {
@@ -211,14 +213,13 @@ public:
                 if (&e1 == &e2)
                     continue;
 
-                if (glm::length(e1.pos - e2.pos) + e1.size < e2.size) {
+                if (e1.size < e2.size && glm::length(e1.pos - e2.pos) <
+                                             (e1.size + e2.size) * 0.9f) {
                     e2.size += e1.size / 2;
                     e1.size /= 2;
 
                     e1.pos = Entity::randomPos();
-
-                    broadcastEntityChange(e1, true);
-                    broadcastEntityChange(e2, false);
+                    ++e1.teleport_count;
                 }
             }
         }
@@ -228,17 +229,32 @@ public:
                 auto id = entities_[i].id;
                 std::swap(entities_[i], entities_.back());
                 entities_.pop_back();
-
-                for (auto& [peer, _]: clients_) {
-                    send(
-                        peer,
-                        0,
-                        ENET_PACKET_FLAG_RELIABLE,
-                        PDestroyEntity{.id = id});
-                }
             } else {
                 ++i;
             }
+        }
+    }
+
+    void handlePacket(ENetPeer* peer, const PStateDeltaConfirmation& packet)
+    {
+        auto& client = clients_.at(peer);
+        client.delta_queue.ReceiveConfirmation(packet.epoch);
+    }
+
+    void send_deltas()
+    {
+        const std::span state{
+            reinterpret_cast<const uint8_t*>(entities_.data()),
+            entities_.size() * sizeof(decltype(entities_)::value_type)};
+
+        for (auto& [to, client]: clients_) {
+            const auto [epoch, delta] = client.delta_queue.GetStateDelta(state);
+            send(
+                to,
+                1,
+                {},
+                PStateDelta{.epoch = epoch, .total_bytes = state.size()},
+                delta);
         }
     }
 
@@ -264,18 +280,7 @@ public:
             if ((now - lastSendTime) > kSendRate) {
                 lastSendTime = now;
 
-                for (auto& [to, _]: clients_) {
-                    for (auto& entity: entities_) {
-                        send(
-                            to,
-                            1,
-                            {},
-                            PEntitySnapshot{
-                                .id = entity.id,
-                                .pos = entity.pos,
-                            });
-                    }
-                }
+                send_deltas();
             }
 
             Service::poll();
@@ -286,6 +291,7 @@ private:
     struct ClientData {
         uint32_t id;
         id_t entityId;
+        DeltaSendQueue delta_queue;
     };
 
     std::unordered_map<ENetPeer*, ClientData> clients_;

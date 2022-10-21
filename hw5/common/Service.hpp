@@ -56,7 +56,7 @@ public:
         static_assert(
             !requires { typename Packet<t>::Continuation; },
             "Missing continuation argument in send!");
-        enet_peer_send(
+        peer_send_ciphered(
             peer, channel, enet_packet_create(&packet, sizeof(packet), flag));
     }
 
@@ -67,14 +67,14 @@ public:
         enet_uint8 channel,
         ENetPacketFlag flag,
         const Packet<t>& packet,
-        std::span<typename Packet<t>::Continuation> cont)
+        std::span<const typename Packet<t>::Continuation> cont)
     {
         using Cont = typename Packet<t>::Continuation;
         size_t contSizeBytes = sizeof(Cont) * cont.size();
         auto enetpacket =
             enet_packet_create(&packet, sizeof(packet) + contSizeBytes, flag);
         std::memcpy(enetpacket->data + sizeof(packet), cont.data(), contSizeBytes);
-        enet_peer_send(peer, channel, enetpacket);
+        peer_send_ciphered(peer, channel, enetpacket);
     }
 
     template<PacketType t>
@@ -118,6 +118,8 @@ public:
                     break;
 
                 case ENET_EVENT_TYPE_DISCONNECT:
+                    keys_.erase(event.peer);
+
                     if (auto it = pending_disconnect_.find(event.peer);
                         it != pending_disconnect_.end()) {
                         std::move(it->second)();
@@ -129,6 +131,8 @@ public:
                     break;
 
                 case ENET_EVENT_TYPE_RECEIVE: {
+                    cipherXor(event.peer, event.packet);
+
                     ENetPeer* peer = event.peer;
                     uint8_t* data = event.packet->data;
 
@@ -199,12 +203,37 @@ public:
         }
     }
 
+    void setKeyForPeer(ENetPeer* peer, std::vector<uint8_t> key)
+    {
+        keys_[peer] = std::move(key);
+    }
+
 private:
     Derived& self() { return *static_cast<Derived*>(this); }
     const Derived& self() const { return *static_cast<const Derived*>(this); }
+
+    void cipherXor(ENetPeer* peer, ENetPacket* packet) const
+    {
+        if (!keys_.contains(peer))
+            return;
+
+        auto& key = keys_.at(peer);
+
+        for (size_t i = 0; i < packet->dataLength; ++i) {
+            *packet->data ^= key[i % key.size()];
+        }
+    }
+
+    void peer_send_ciphered(
+        ENetPeer* peer, enet_uint8 channelID, ENetPacket* packet) const
+    {
+        cipherXor(peer, packet);
+        enet_peer_send(peer, channelID, packet);
+    }
 
 private:
     UniquePtr<ENetHost> host_;
     std::unordered_map<ENetPeer*, fu2::function<void(ENetPeer*)>> pending_connect_;
     std::unordered_map<ENetPeer*, fu2::function<void()>> pending_disconnect_;
+    std::unordered_map<ENetPeer*, std::vector<uint8_t>> keys_;
 };

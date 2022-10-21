@@ -9,6 +9,7 @@
 #include "common/Service.hpp"
 #include "common/assert.hpp"
 #include "common/common.hpp"
+#include "common/delta.hpp"
 #include "common/proto.hpp"
 
 #include "game/Entity.hpp"
@@ -31,8 +32,8 @@ class ClientService :
     public Allegro<ClientService> {
     using Clock = std::chrono::steady_clock;
 
-    struct EntitySnapshot {
-        glm::vec2 pos;
+    struct StateSnapshot {
+        std::vector<Entity> entities;
         Clock::time_point time;
     };
 
@@ -72,7 +73,7 @@ public:
         otherIds_.erase(packet.id);
     }
 
-    void handlePacket(ENetPeer*, const PPossesEntity& packet)
+    void handlePacket(ENetPeer*, const PPossessEntity& packet)
     {
         playerEntityId_ = packet.id;
     }
@@ -83,59 +84,37 @@ public:
         connect(packet.serverAddress, [this](ENetPeer* server) {
             NG_VERIFY(server != nullptr);
             server_peer_ = server;
+            snapshotHistory_.emplace_back(StateSnapshot{.time = Clock::now()});
         });
     }
 
-    void handlePacket(ENetPeer*, const PEntitySnapshot& packet)
+    void handlePacket(
+        ENetPeer* peer, const PStateDelta& packet, std::span<std::uint8_t> cont)
     {
-        auto it = snapshotHistories_.find(packet.id);
-        if (it == snapshotHistories_.end()) {
-            return;
-        }
-        auto& snapshots = it->second;
-        snapshots.push_back(EntitySnapshot{
-            .pos = packet.pos,
-            .time = Clock::now(),
-        });
-        if (snapshots.size() > 10) {
-            snapshots.pop_front();
-        }
-    }
+        auto& newSnapshot =
+            snapshotHistory_.emplace_back(snapshotHistory_.back());
+        newSnapshot.time = Clock::now();
 
-    void handlePacket(ENetPeer*, const PSpawnEntity& packet)
-    {
-        entities_.emplace_back(packet.entity);
-        snapshotHistories_.emplace(
-            packet.entity.id, std::deque<EntitySnapshot>{});
-    }
+        std::cout << "Applying delta of size " << cont.size() << " at epoch "
+                  << packet.epoch << std::endl;
 
-    void handlePacket(ENetPeer*, const PEntityPropsChanged& packet)
-    {
-        if (auto e = entityById(packet.id)) {
-            e->size = packet.size;
-            e->color = packet.color;
+        delta_apply(newSnapshot.entities, cont, packet.total_bytes);
+        send(peer, 1, {}, PStateDeltaConfirmation{.epoch = packet.epoch});
+
+        if (snapshotHistory_.size() > 10) {
+            snapshotHistory_.pop_front();
         }
     }
 
-    void handlePacket(ENetPeer*, const PEntityTeleport& packet)
+    // input delta-compression
+    void handlePacket(ENetPeer* peer, const PStateDeltaConfirmation& packet)
     {
-        if (auto e = entityById(packet.id)) {
-            e->pos = packet.pos;
-        }
-
-        // history is useless if we teleported
-        if (auto it = snapshotHistories_.find(packet.id);
-            it != snapshotHistories_.end()) {
-            it->second.clear();
-        }
+        inputDeltaSendQueue.ReceiveConfirmation(packet.epoch);
     }
 
-    void handlePacket(ENetPeer*, const PDestroyEntity& packet)
+    void handlePacket(ENetPeer* peer, const PSetKey& packet)
     {
-        std::erase_if(entities_, [&packet](const Entity& e) {
-            return e.id == packet.id;
-        });
-        snapshotHistories_.erase(packet.id);
+        setKeyForPeer(peer, {packet.key.begin(), packet.key.end()});
     }
 
     void begin()
@@ -218,7 +197,7 @@ public:
 
     void draw()
     {
-        glm::vec2 playerPos{0, 0};
+        glm::vec2 playerPos{0.5f, 0.5f};
         for (auto& entity: entities_) {
             if (entity.id == playerEntityId_) {
                 playerPos = entity.pos;
@@ -269,25 +248,15 @@ public:
     }
 
     void interpolate(
-        Entity& entity,
-        std::deque<EntitySnapshot>& snapshots,
-        Clock::time_point time)
+        Entity& targetEnt, const Entity& prevEnt, float delta, float timeDistance)
     {
-        while (snapshots.size() > 2 && snapshots[1].time < time) {
-            snapshots.pop_front();
+        if (targetEnt.teleport_count != prevEnt.teleport_count) {
+            targetEnt.pos = prevEnt.pos + prevEnt.vel * delta;
+            return;
         }
+        auto h = delta / timeDistance;
 
-        if (snapshots.size() == 1) {
-            entity.pos = snapshots.front().pos;
-        } else if (snapshots.size() >= 2) {
-            const auto& old = snapshots[0];
-            const auto& recent = snapshots[1];
-
-            auto h = durationToSecs(time - old.time) /
-                     durationToSecs(recent.time - old.time);
-
-            entity.pos = recent.pos * h + (1 - h) * old.pos;
-        }
+        targetEnt.pos = targetEnt.pos * h + (1 - h) * prevEnt.pos;
     }
 
     void applySnapshots(Clock::time_point now, float delta)
@@ -295,13 +264,34 @@ public:
         constexpr auto forcedLagMs = 250ms;
         auto time = now - forcedLagMs;
 
-        for (auto& entity: entities_) {
-            if (!snapshotHistories_.contains(entity.id))
-                continue;
-            auto& snapshots = snapshotHistories_.at(entity.id);
+        while (snapshotHistory_.size() > 2 && snapshotHistory_[1].time < time) {
+            snapshotHistory_.pop_front();
+        }
+
+        auto targetSnapshot = snapshotHistory_[1];
+        const auto& prevSnapshot = snapshotHistory_[0];
+
+        std::unordered_map<id_t, const Entity*> prevEntities;
+        for (const auto& ent: prevSnapshot.entities) {
+            prevEntities.try_emplace(ent.id, &ent);
+        }
+
+        for (auto& entity: targetSnapshot.entities) {
             if (entity.id != playerEntityId_) {
-                interpolate(entity, snapshots, time);
+                if (prevEntities.contains(entity.id)) {
+                    const auto& prevEnt = *prevEntities.at(entity.id);
+                    interpolate(
+                        entity,
+                        prevEnt,
+                        durationToSecs(time - prevSnapshot.time),
+                        durationToSecs(targetSnapshot.time - prevSnapshot.time));
+                }
             } else {
+                auto player = entityById(playerEntityId_);
+                if (player != nullptr) {
+                    entity.pos = player->pos;
+                }
+
                 playerVelHistory_.emplace_back(PlayerInputSnapshot{
                     .vel = playerDesiredSpeed_,
                     .time = now,
@@ -321,30 +311,37 @@ public:
                     }
                 }
 
-                if (snapshots.empty())
-                    continue;
+                const auto& snapshot = snapshotHistory_.back();
 
-                auto snapshot = snapshots.back();
+                auto it = std::find_if(
+                    snapshot.entities.begin(),
+                    snapshot.entities.end(),
+                    [this](const Entity& e) { return e.id == playerEntityId_; });
+
+                if (it == snapshot.entities.end()) {
+                    continue;
+                }
+
                 // std::chrono is f'n awesome
-                snapshot.time -= server_peer_->roundTripTime / 2 * 1ms;
-                snapshots.clear();
+                Clock::time_point last =
+                    snapshot.time - server_peer_->roundTripTime / 2 * 1ms;
                 while (!playerVelHistory_.empty() &&
-                       playerVelHistory_.front().time < snapshot.time) {
+                       playerVelHistory_.front().time < last) {
                     playerVelHistory_.pop_front();
                 }
 
                 Entity predicted = entity;
-                predicted.pos = snapshot.pos;
-                Clock::time_point last = snapshot.time;
+                predicted.pos = it->pos;
                 for (auto& [vel, time]: playerVelHistory_) {
                     predicted.vel = vel;
                     predicted.simulate(durationToSecs(time - last));
                     last = time;
                 }
-
                 playerServerPredicted = predicted;
             }
         }
+
+        entities_ = std::move(targetSnapshot.entities);
     }
 
     void run()
@@ -370,11 +367,19 @@ public:
             if (server_peer_ != nullptr && playerEntityId_ != kInvalidId &&
                 (now - lastSendTime) > kSendRate) {
                 lastSendTime = now;
+
+                const std::span state{
+                    reinterpret_cast<const uint8_t*>(&playerDesiredSpeed_),
+                    sizeof(playerDesiredSpeed_)};
+
+                const auto [epoch, delta] =
+                    inputDeltaSendQueue.GetStateDelta(state);
                 send(
                     server_peer_,
                     1,
                     {},
-                    PPlayerInput{.desiredSpeed = playerDesiredSpeed_});
+                    PStateDelta{.epoch = epoch, .total_bytes = state.size()},
+                    delta);
             }
         }
 
@@ -392,7 +397,9 @@ private:
 
     id_t playerEntityId_;
     std::vector<Entity> entities_;
-    std::unordered_map<id_t, std::deque<EntitySnapshot>> snapshotHistories_;
+    std::deque<StateSnapshot> snapshotHistory_;
+
+    DeltaSendQueue inputDeltaSendQueue;
 
     glm::vec2 playerDesiredSpeed_{0, 0};
     // kostyl: we don't have a predicted pos for the first few frames
